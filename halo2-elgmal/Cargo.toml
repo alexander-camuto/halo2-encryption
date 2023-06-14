@@ -9,6 +9,8 @@ edition = "2021"
 anyhow = "*"
 halo2_gadgets = { git = "https://github.com/zkonduit/halo2", default_features = false, branch= "ac/public-cells" }
 halo2curves = { git = 'https://github.com/privacy-scaling-explorations/halo2curves', tag = "0.3.2", features = ["derive_serde"], default_features = false }
+ezkl-lib = { git = "https://github.com/zkonduit/ezkl" } 
+
 
 halo2_proofs = { git = "https://github.com/zkonduit/halo2", branch= "ac/public-cells", default_features = false, features = ["thread-safe-region"]}
 group = "0.11"
@@ -16,3 +18,13 @@ ff = "*"
 lazy_static = "*"
 
 ark-std = { version = "^0.3.0", default-features = false }
+
+
+[dev-dependencies]
+criterion = {version = "0.3",  features = ["html_reports"]}
+
+
+
+[[bench]]
+name = "encrypt-block"
+harness = false

@@ -20,7 +20,7 @@ use std::vec;
 
 // Absolute offsets for public inputs.
 const C1_X: usize = 0;
-const C1_Y: usize = 0;
+const C1_Y: usize = 1;
 
 pub struct ElGamalChip {
     config: ElGamalConfig,
@@ -35,8 +35,7 @@ pub struct ElGamalConfig {
     poseidon_config: PoseidonConfig<pallas::Base, 3, 2>,
     add_config: AddConfig,
     plaintext_col: Column<Advice>,
-    ciphertext_c1x_exp_col: Column<Instance>,
-    ciphertext_c1y_exp_col: Column<Instance>,
+    ciphertext_c1_exp_col: Column<Instance>,
     ciphertext_c2_exp_col: Column<Instance>,
 }
 
@@ -123,10 +122,8 @@ impl ElGamalChip {
 
         let add_config = AddChip::configure(meta, dh_col, plaintext_col, ciphertext_res_col);
 
-        let ciphertext_c1x_exp_col = meta.instance_column();
-        let ciphertext_c1y_exp_col = meta.instance_column();
-        meta.enable_equality(ciphertext_c1x_exp_col);
-        meta.enable_equality(ciphertext_c1y_exp_col);
+        let ciphertext_c1_exp_col = meta.instance_column();
+        meta.enable_equality(ciphertext_c1_exp_col);
 
         let ciphertext_c2_exp_col = meta.instance_column();
         meta.enable_equality(ciphertext_c2_exp_col);
@@ -136,14 +133,13 @@ impl ElGamalChip {
             ecc_config,
             add_config,
             plaintext_col,
-            ciphertext_c1x_exp_col,
-            ciphertext_c1y_exp_col,
+            ciphertext_c1_exp_col,
             ciphertext_c2_exp_col,
         }
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct ElGamalGadget {
     r: pallas::Scalar,
     msg: Vec<pallas::Base>,
@@ -204,11 +200,7 @@ impl ElGamalGadget {
             .map(|c| vec![c.x().clone(), c.y().clone()])
             .unwrap();
 
-        vec![
-            vec![c1_coordinates[0]],
-            vec![c1_coordinates[1]],
-            cipher.1.clone(),
-        ]
+        vec![c1_coordinates, cipher.1.clone()]
     }
 
     pub(crate) fn verify_encryption(
@@ -267,6 +259,7 @@ impl ElGamalGadget {
 impl Circuit<pallas::Base> for ElGamalGadget {
     type Config = ElGamalConfig;
     type FloorPlanner = SimpleFloorPlanner;
+    type Params = ();
     fn without_witnesses(&self) -> Self {
         Self::default()
     }
@@ -306,12 +299,8 @@ impl Circuit<pallas::Base> for ElGamalGadget {
                 &msg_var[i],
             )?;
             layouter
-                .constrain_instance(c1.x().cell(), config.ciphertext_c1x_exp_col, C1_X)
-                .and(layouter.constrain_instance(
-                    c1.y().cell(),
-                    config.ciphertext_c1y_exp_col,
-                    C1_Y,
-                ))
+                .constrain_instance(c1.x().cell(), config.ciphertext_c1_exp_col, C1_X)
+                .and(layouter.constrain_instance(c1.y().cell(), config.ciphertext_c1_exp_col, C1_Y))
                 .and(layouter.constrain_instance(c2.cell(), config.ciphertext_c2_exp_col, i))?;
         }
         Ok(())
