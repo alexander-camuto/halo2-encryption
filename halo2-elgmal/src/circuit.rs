@@ -1,31 +1,26 @@
 use crate::add_chip::{AddChip, AddConfig, AddInstruction};
 use crate::constants::TestFixedBases;
 use ark_std::rand::{CryptoRng, RngCore};
-use halo2_gadgets::ecc::chip::{EccChip, EccConfig, EccPoint, NonIdentityEccPoint};
-use halo2_gadgets::ecc::{
-    BaseFitsInScalarInstructions, EccInstructions, FixedPoints, Point, ScalarVar,
-};
+use halo2_gadgets::ecc::chip::{EccChip, EccConfig, EccPoint};
+use halo2_gadgets::ecc::EccInstructions;
 use halo2_gadgets::poseidon::{
     primitives::{self as poseidon, ConstantLength},
-    Hash as PoseidonHash, PoseidonSpongeInstructions, Pow5Chip as PoseidonChip,
-    Pow5Config as PoseidonConfig,
+    Hash as PoseidonHash, Pow5Chip as PoseidonChip, Pow5Config as PoseidonConfig,
 };
 use halo2_gadgets::utilities::lookup_range_check::LookupRangeCheckConfig;
-use halo2_proofs::arithmetic::{Field, FieldExt};
+use halo2_proofs::arithmetic::Field;
 use halo2_proofs::circuit::{AssignedCell, Chip, Layouter, SimpleFloorPlanner, Value};
-use halo2_proofs::dev::MockProver;
-use halo2_proofs::pasta::group::{Curve, Group};
-use halo2_proofs::pasta::{pallas, Fp};
 use halo2_proofs::plonk;
 use halo2_proofs::plonk::{Advice, Circuit, Column, ConstraintSystem, Error, Instance};
-use pasta_curves::arithmetic::CurveAffine;
-use std::ffi::c_void;
+use halo2curves::group::{Curve, Group};
+use halo2curves::pasta::pallas;
+use halo2curves::CurveAffine;
 use std::ops::{Mul, MulAssign};
+use std::vec;
 
 // Absolute offsets for public inputs.
 const C1_X: usize = 0;
-const C1_Y: usize = 1;
-const C2: usize = 2;
+const C1_Y: usize = 0;
 
 pub struct ElGamalChip {
     config: ElGamalConfig,
@@ -40,7 +35,6 @@ pub struct ElGamalConfig {
     poseidon_config: PoseidonConfig<pallas::Base, 3, 2>,
     add_config: AddConfig,
     plaintext_col: Column<Advice>,
-    ciphertext_res_col: Column<Advice>,
     ciphertext_c1x_exp_col: Column<Instance>,
     ciphertext_c1y_exp_col: Column<Instance>,
     ciphertext_c2_exp_col: Column<Instance>,
@@ -142,7 +136,6 @@ impl ElGamalChip {
             ecc_config,
             add_config,
             plaintext_col,
-            ciphertext_res_col,
             ciphertext_c1x_exp_col,
             ciphertext_c1y_exp_col,
             ciphertext_c2_exp_col,
@@ -153,24 +146,20 @@ impl ElGamalChip {
 #[derive(Default)]
 pub struct ElGamalGadget {
     r: pallas::Scalar,
-    msg: pallas::Base,
+    msg: Vec<pallas::Base>,
     pk: pallas::Point,
-    pub resulted_ciphertext: (pallas::Point, pallas::Base),
+    pub resulted_ciphertext: (pallas::Point, Vec<pallas::Base>),
 }
 
 impl ElGamalGadget {
-    pub fn new(
-        r: pallas::Scalar,
-               msg: pallas::Base,
-               pk: pallas::Point
-    ) -> ElGamalGadget {
+    pub fn new(r: pallas::Scalar, msg: Vec<pallas::Base>, pk: pallas::Point) -> ElGamalGadget {
         let resulted_ciphertext = Self::encrypt(pk.clone(), msg.clone(), r.clone());
         return Self {
             r,
             msg,
             pk,
-            resulted_ciphertext
-        }
+            resulted_ciphertext,
+        };
     }
 
     pub fn keygen<R: CryptoRng + RngCore>(
@@ -188,21 +177,26 @@ impl ElGamalGadget {
 
     pub fn encrypt(
         pk: pallas::Point,
-        msg: pallas::Base,
+        msg: Vec<pallas::Base>,
         r: pallas::Scalar,
-    ) -> (pallas::Point, pallas::Base) {
+    ) -> (pallas::Point, Vec<pallas::Base>) {
         let c1 = pallas::Point::generator().mul(&r);
         let p_ra = pk.mul(&r).to_affine().coordinates().unwrap();
 
-        let mut hasher =
+        let hasher =
             poseidon::Hash::<pallas::Base, poseidon::P128Pow5T3, ConstantLength<2>, 3, 2>::init();
         let dh = hasher.hash([p_ra.x().clone(), p_ra.y().clone()]);
-        let c2 = msg + dh;
+
+        let mut c2 = vec![];
+
+        for i in 0..msg.len() {
+            c2.push(msg[i] + dh);
+        }
 
         return (c1, c2);
     }
 
-    pub fn get_instances(cipher: &(pallas::Point, pallas::Base)) -> Vec<Vec<pallas::Base>> {
+    pub fn get_instances(cipher: &(pallas::Point, Vec<pallas::Base>)) -> Vec<Vec<pallas::Base>> {
         let c1_coordinates = cipher
             .0
             .to_affine()
@@ -213,32 +207,31 @@ impl ElGamalGadget {
         vec![
             vec![c1_coordinates[0]],
             vec![c1_coordinates[1]],
-            vec![cipher.1],
+            cipher.1.clone(),
         ]
     }
 
-    pub(crate) fn verify_encryption<
-        PoseidonChip: PoseidonSpongeInstructions<pallas::Base, poseidon::P128Pow5T3, ConstantLength<2>, 3, 2>,
-        AddChip: AddInstruction<pallas::Base>,
-    >(
+    pub(crate) fn verify_encryption(
         &self,
         mut layouter: impl Layouter<pallas::Base>,
-        poseidon_chip: PoseidonChip,
-        add_chip: AddChip,
-        ecc_chip: EccChip<TestFixedBases>,
+        config: ElGamalConfig,
         m: &AssignedCell<pallas::Base, pallas::Base>,
     ) -> Result<(EccPoint, AssignedCell<pallas::Base, pallas::Base>), plonk::Error> {
+        let chip = ElGamalChip::new(config.clone());
+
         let g = pallas::Point::generator();
 
         // compute s = randomness*pk
         let s = self.pk.clone().mul(self.r).to_affine();
-        let s = ecc_chip
+        let s = chip
+            .ecc
             .witness_point(&mut layouter, Value::known(s))
             .unwrap();
 
         // compute c1 = randomness*generator
         let c1 = g.mul(self.r).to_affine();
-        let c1 = ecc_chip
+        let c1 = chip
+            .ecc
             .witness_point(&mut layouter, Value::known(c1))
             .unwrap();
 
@@ -246,7 +239,14 @@ impl ElGamalGadget {
         let dh = {
             let poseidon_message = [s.x(), s.y()];
             let poseidon_hasher =
-                PoseidonHash::init(poseidon_chip, layouter.namespace(|| "Poseidon hasher"))?;
+                PoseidonHash::<
+                    pallas::Base,
+                    PoseidonChip<pallas::Base, 3, 2>,
+                    poseidon::P128Pow5T3,
+                    ConstantLength<2>,
+                    3,
+                    2,
+                >::init(chip.poseidon, layouter.namespace(|| "Poseidon hasher"))?;
             poseidon_hasher.hash(
                 layouter.namespace(|| "Poseidon hash (randomness*pk)"),
                 poseidon_message,
@@ -254,7 +254,7 @@ impl ElGamalGadget {
         };
 
         // compute c2 = poseidon_hash(nk, rho) + psi.
-        let c2 = add_chip.add(
+        let c2 = chip.add.add(
             layouter.namespace(|| "c2 = poseidon_hash(randomness*pk) + m"),
             &dh,
             m,
@@ -279,32 +279,41 @@ impl Circuit<pallas::Base> for ElGamalGadget {
         config: Self::Config,
         mut layouter: impl Layouter<pallas::Base>,
     ) -> Result<(), Error> {
-        let chip = ElGamalChip::new(config.clone());
-
         let msg_var = layouter.assign_region(
             || "plaintext",
             |mut region| {
-                region.assign_advice(
-                    || "plaintext",
-                    config.plaintext_col,
-                    0,
-                    || Value::known(self.msg),
-                )
+                let res: Result<Vec<_>, _> = self
+                    .msg
+                    .iter()
+                    .enumerate()
+                    .map(|(i, m)| {
+                        region.assign_advice(
+                            || format!("plaintext {}", i),
+                            config.plaintext_col,
+                            i,
+                            || Value::known(*m),
+                        )
+                    })
+                    .collect();
+                res
             },
         )?;
 
-        let (c1, c2) = self.verify_encryption(
-            layouter.namespace(|| "verify_encryption"),
-            chip.poseidon,
-            chip.add,
-            chip.ecc,
-            &msg_var,
-        )?;
-
-        layouter
-            .constrain_instance(c1.x().cell(), config.ciphertext_c1x_exp_col, C1_X)
-            .and(layouter.constrain_instance(c1.y().cell(), config.ciphertext_c1y_exp_col, C1_Y))
-            .and(layouter.constrain_instance(c2.cell(), config.ciphertext_c2_exp_col, C2))
+        for i in 0..msg_var.len() {
+            let (c1, c2) = self.verify_encryption(
+                layouter.namespace(|| "verify_encryption"),
+                config.clone(),
+                &msg_var[i],
+            )?;
+            layouter
+                .constrain_instance(c1.x().cell(), config.ciphertext_c1x_exp_col, C1_X)
+                .and(layouter.constrain_instance(
+                    c1.y().cell(),
+                    config.ciphertext_c1y_exp_col,
+                    C1_Y,
+                ))
+                .and(layouter.constrain_instance(c2.cell(), config.ciphertext_c2_exp_col, i))?;
+        }
+        Ok(())
     }
 }
-

@@ -6,12 +6,13 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-anyhow = "1.0.58"
-halo2_gadgets = "0.2"
-halo2_proofs = "0.2"
+anyhow = "*"
+halo2_gadgets = { git = "https://github.com/zkonduit/halo2", default_features = false, branch= "ac/public-cells" }
+halo2curves = { git = 'https://github.com/privacy-scaling-explorations/halo2curves', tag = "0.3.2", features = ["derive_serde"], default_features = false }
+
+halo2_proofs = { git = "https://github.com/zkonduit/halo2", branch= "ac/public-cells", default_features = false, features = ["thread-safe-region"]}
 group = "0.11"
-ff = "0.11"
-pasta_curves = "0.4"
-lazy_static = "1.4.0"
+ff = "*"
+lazy_static = "*"
 
 ark-std = { version = "^0.3.0", default-features = false }

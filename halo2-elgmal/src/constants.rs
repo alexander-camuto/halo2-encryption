@@ -1,13 +1,13 @@
+use ff::PrimeField;
 use halo2_gadgets::ecc::chip::{BaseFieldElem, FixedPoint, FullScalar, ShortScalar};
 use halo2_gadgets::ecc::{
     chip::{find_zs_and_us, H, NUM_WINDOWS, NUM_WINDOWS_SHORT},
     FixedPoints,
 };
-use halo2_proofs::pasta::pallas;
+use halo2curves::group::{Curve, Group};
+use halo2curves::pasta::pallas;
 use lazy_static::lazy_static;
-use pasta_curves::group::ff::PrimeField;
-use pasta_curves::group::{Curve, Group};
-use std::fmt::{Debug, Formatter};
+use std::fmt::Debug;
 
 #[derive(Debug, Eq, PartialEq, Clone)]
 pub(crate) struct TestFixedBases;
@@ -24,19 +24,6 @@ lazy_static! {
         find_zs_and_us(*BASE, NUM_WINDOWS).unwrap();
     static ref ZS_AND_US_SHORT: Vec<(u64, [pallas::Base; H])> =
         find_zs_and_us(*BASE, NUM_WINDOWS_SHORT).unwrap();
-}
-
-impl FullWidth {
-    pub(crate) fn from_pallas_generator() -> Self {
-        FullWidth(*BASE, &ZS_AND_US)
-    }
-
-    pub(crate) fn from_parts(
-        base: pallas::Affine,
-        zs_and_us: &'static [(u64, [pallas::Base; H])],
-    ) -> Self {
-        FullWidth(base, zs_and_us)
-    }
 }
 
 impl FixedPoint<pallas::Affine> for FullWidth {

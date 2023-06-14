@@ -1,13 +1,13 @@
-use halo2_proofs::pasta::pallas;
 use halo2_proofs::{
     circuit::{AssignedCell, Chip, Layouter},
     plonk::{self, Advice, Column, ConstraintSystem, Constraints, Selector},
     poly::Rotation,
 };
-use pasta_curves::arithmetic::FieldExt;
+use halo2curves::ff::PrimeField;
+use halo2curves::pasta::pallas;
 
 /// An instruction set for adding two circuit words (field elements).
-pub(crate) trait AddInstruction<F: FieldExt>: Chip<F> {
+pub(crate) trait AddInstruction<F: PrimeField>: Chip<F> {
     /// Constraints `a + b` and returns the sum.
     fn add(
         &self,
