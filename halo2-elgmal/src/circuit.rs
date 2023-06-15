@@ -217,6 +217,26 @@ impl ElGamalGadget {
         return (c1, c2);
     }
 
+    pub fn decrypt(cipher: &(G1, Vec<Fr>), sk: Fr) -> Vec<Fr> {
+        let c1 = cipher.0.clone();
+        let c2 = cipher.1.clone();
+
+        let s = c1.mul(sk).to_affine().coordinates().unwrap();
+
+        let x = Integer::from_fe(*s.x(), Self::rns());
+        let y = Integer::from_fe(*s.y(), Self::rns());
+
+        let hasher = poseidon::Hash::<Fr, PoseidonSpec, ConstantLength<2>, 2, 1>::init();
+        let dh = hasher.hash([x.native().clone(), y.native().clone()]); // this is Fq now :( (we need Fr)
+
+        let mut msg = vec![];
+        for i in 0..c2.len() {
+            msg.push(c2[i] - dh);
+        }
+
+        return msg;
+    }
+
     pub fn get_instances(cipher: &(G1, Vec<Fr>)) -> Vec<Vec<Fr>> {
         let c1_coordinates = cipher
             .0
@@ -352,5 +372,33 @@ impl Circuit<Fr> for ElGamalGadget {
                 .and(layouter.constrain_instance(c2.cell(), config.ciphertext_c2_exp_col, i))?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ark_std::test_rng;
+
+    #[test]
+    pub fn test_encrypt_decrypt() {
+        let mut rng = test_rng();
+
+        let (sk, pk) = ElGamalGadget::keygen(&mut rng).unwrap();
+
+        let r = Fr::random(&mut rng);
+
+        let mut msg = vec![];
+        //
+        for _ in 0..32 {
+            msg.push(Fr::random(&mut rng));
+        }
+
+        let circuit = ElGamalGadget::new(r, msg, pk.to_affine());
+        let cipher_text = circuit.resulted_ciphertext.clone();
+
+        let decrypted_msg = ElGamalGadget::decrypt(&cipher_text, sk);
+
+        assert_eq!(decrypted_msg, circuit.msg);
     }
 }
