@@ -102,14 +102,13 @@ impl ElGamalChip {
             meta.fixed_column(),
             meta.fixed_column(),
             meta.fixed_column(),
-            meta.fixed_column(),
         ];
         let rc_a = lagrange_coeffs[0..2].try_into().unwrap();
         let rc_b = lagrange_coeffs[2..4].try_into().unwrap();
 
         // Also use the first Lagrange coefficient column for loading global constants.
         // It's free real estate :)
-        meta.enable_constant(lagrange_coeffs[4]);
+        meta.enable_constant(lagrange_coeffs[3]);
 
         let rns = Rns::<Fq, Fr, NUMBER_OF_LIMBS, BIT_LEN_LIMB>::construct();
 
