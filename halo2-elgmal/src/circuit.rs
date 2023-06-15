@@ -1,12 +1,10 @@
 use crate::add_chip::{AddChip, AddConfig, AddInstruction};
-use ark_std::rand::rngs::OsRng;
 use ark_std::rand::{CryptoRng, RngCore};
 use ecc::integer::rns::{Common, Integer, Rns};
-use ecc::integer::NUMBER_OF_LOOKUP_LIMBS;
 use ecc::maingate::{
     MainGate, MainGateConfig, RangeChip, RangeConfig, RangeInstructions, RegionCtx,
 };
-use ecc::{AssignedPoint, BaseFieldEccChip, EccConfig, GeneralEccChip, Point};
+use ecc::{AssignedPoint, BaseFieldEccChip, EccConfig};
 use ezkl_lib::circuit::modules::poseidon::spec::PoseidonSpec;
 use halo2_gadgets::poseidon::{
     primitives::{self as poseidon, ConstantLength},
@@ -18,7 +16,6 @@ use halo2_proofs::plonk;
 use halo2_proofs::plonk::{Advice, Circuit, Column, ConstraintSystem, Error, Instance};
 use halo2curves::bn256::{Fq, Fr, G1Affine, G1};
 use halo2curves::group::Curve;
-use halo2curves::group::Group;
 use halo2curves::CurveAffine;
 use std::ops::{Mul, MulAssign};
 use std::rc::Rc;
@@ -74,22 +71,6 @@ impl Chip<Fq> for ElGamalChip {
     fn loaded(&self) -> &Self::Loaded {
         &()
     }
-}
-
-fn rns<C: CurveAffine>() -> Rns<C::Base, C::Scalar, NUMBER_OF_LIMBS, BIT_LEN_LIMB> {
-    Rns::construct()
-}
-
-fn setup<C: CurveAffine>(
-    k_override: u32,
-) -> (Rns<C::Base, C::Scalar, NUMBER_OF_LIMBS, BIT_LEN_LIMB>, u32) {
-    let rns = rns::<C>();
-    let bit_len_lookup = BIT_LEN_LIMB / NUMBER_OF_LOOKUP_LIMBS;
-    let mut k: u32 = (bit_len_lookup + 1) as u32;
-    if k_override != 0 {
-        k = k_override;
-    }
-    (rns, k)
 }
 
 impl ElGamalChip {
@@ -313,8 +294,6 @@ impl ElGamalGadget {
             m,
         )?;
 
-        config.config_range(&mut layouter)?;
-
         Ok((c1, c2))
     }
 }
@@ -335,6 +314,8 @@ impl Circuit<Fr> for ElGamalGadget {
         config: Self::Config,
         mut layouter: impl Layouter<Fr>,
     ) -> Result<(), Error> {
+        config.config_range(&mut layouter)?;
+
         let msg_var = layouter.assign_region(
             || "plaintext",
             |mut region| {

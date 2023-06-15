@@ -2,10 +2,7 @@ use ark_std::test_rng;
 use halo2_elgmal::ElGamalGadget;
 use halo2_proofs::arithmetic::Field;
 use halo2_proofs::dev::MockProver;
-use halo2curves::{
-    bn256::{Fq, Fr},
-    group::Curve,
-};
+use halo2curves::{bn256::Fr, group::Curve};
 
 fn main() {
     let mut rng = test_rng();
