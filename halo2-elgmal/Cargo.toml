@@ -8,6 +8,8 @@ edition = "2021"
 [dependencies]
 anyhow = "*"
 halo2_gadgets = { git = "https://github.com/zkonduit/halo2", default_features = false, branch= "ac/public-cells" }
+ecc = { git = "https://github.com/zkonduit/halo2wrong", default_features = false, branch= "ac/send-sync-region" }
+
 halo2curves = { git = 'https://github.com/privacy-scaling-explorations/halo2curves', tag = "0.3.2", features = ["derive_serde"], default_features = false }
 ezkl-lib = { git = "https://github.com/zkonduit/ezkl" } 
 

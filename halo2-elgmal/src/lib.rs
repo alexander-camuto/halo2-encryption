@@ -1,5 +1,6 @@
 mod add_chip;
-mod constants;
 mod circuit;
+mod constants;
+mod poseidon_spec;
 
 pub use circuit::*;

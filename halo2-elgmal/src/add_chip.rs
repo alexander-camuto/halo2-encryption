@@ -3,8 +3,8 @@ use halo2_proofs::{
     plonk::{self, Advice, Column, ConstraintSystem, Constraints, Selector},
     poly::Rotation,
 };
+use halo2curves::bn256::Fr;
 use halo2curves::ff::PrimeField;
-use halo2curves::pasta::pallas;
 
 /// An instruction set for adding two circuit words (field elements).
 pub(crate) trait AddInstruction<F: PrimeField>: Chip<F> {
@@ -31,7 +31,7 @@ pub struct AddChip {
     config: AddConfig,
 }
 
-impl Chip<pallas::Base> for AddChip {
+impl Chip<Fr> for AddChip {
     type Config = AddConfig;
     type Loaded = ();
 
@@ -46,7 +46,7 @@ impl Chip<pallas::Base> for AddChip {
 
 impl AddChip {
     pub fn configure(
-        meta: &mut ConstraintSystem<pallas::Base>,
+        meta: &mut ConstraintSystem<Fr>,
         a: Column<Advice>,
         b: Column<Advice>,
         c: Column<Advice>,
@@ -69,13 +69,13 @@ impl AddChip {
     }
 }
 
-impl AddInstruction<pallas::Base> for AddChip {
+impl AddInstruction<Fr> for AddChip {
     fn add(
         &self,
-        mut layouter: impl Layouter<pallas::Base>,
-        a: &AssignedCell<pallas::Base, pallas::Base>,
-        b: &AssignedCell<pallas::Base, pallas::Base>,
-    ) -> Result<AssignedCell<pallas::Base, pallas::Base>, plonk::Error> {
+        mut layouter: impl Layouter<Fr>,
+        a: &AssignedCell<Fr, Fr>,
+        b: &AssignedCell<Fr, Fr>,
+    ) -> Result<AssignedCell<Fr, Fr>, plonk::Error> {
         layouter.assign_region(
             || "c = a + b",
             |mut region| {

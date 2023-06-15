@@ -1,19 +1,19 @@
 use crate::add_chip::{AddChip, AddConfig, AddInstruction};
-use crate::constants::TestFixedBases;
 use ark_std::rand::{CryptoRng, RngCore};
-use halo2_gadgets::ecc::chip::{EccChip, EccConfig, EccPoint};
-use halo2_gadgets::ecc::EccInstructions;
+use ecc::integer::rns::Rns;
+use ecc::maingate::{MainGate, RangeChip, RegionCtx};
+use ecc::{AssignedPoint, BaseFieldEccChip, EccConfig, GeneralEccChip};
+use ezkl_lib::circuit::modules::poseidon::spec::PoseidonSpec;
 use halo2_gadgets::poseidon::{
     primitives::{self as poseidon, ConstantLength},
     Hash as PoseidonHash, Pow5Chip as PoseidonChip, Pow5Config as PoseidonConfig,
 };
-use halo2_gadgets::utilities::lookup_range_check::LookupRangeCheckConfig;
 use halo2_proofs::arithmetic::Field;
 use halo2_proofs::circuit::{AssignedCell, Chip, Layouter, SimpleFloorPlanner, Value};
 use halo2_proofs::plonk;
 use halo2_proofs::plonk::{Advice, Circuit, Column, ConstraintSystem, Error, Instance};
-use halo2curves::group::{Curve, Group};
-use halo2curves::pasta::pallas;
+use halo2curves::bn256::{Fq, Fr, G1Affine, G1};
+use halo2curves::group::Curve;
 use halo2curves::CurveAffine;
 use std::ops::{Mul, MulAssign};
 use std::vec;
@@ -22,24 +22,28 @@ use std::vec;
 const C1_X: usize = 0;
 const C1_Y: usize = 1;
 
+///
+const NUMBER_OF_LIMBS: usize = 4;
+const BIT_LEN_LIMB: usize = 64;
+
 pub struct ElGamalChip {
     config: ElGamalConfig,
-    ecc: EccChip<TestFixedBases>,
-    poseidon: PoseidonChip<pallas::Base, 3, 2>,
+    ecc: BaseFieldEccChip<G1Affine, NUMBER_OF_LIMBS, BIT_LEN_LIMB>,
+    poseidon: PoseidonChip<Fr, 2, 1>,
     add: AddChip,
 }
 
 #[derive(Debug, Clone)]
 pub struct ElGamalConfig {
-    ecc_config: EccConfig<TestFixedBases>,
-    poseidon_config: PoseidonConfig<pallas::Base, 3, 2>,
+    ecc_config: ecc::EccConfig,
+    poseidon_config: PoseidonConfig<Fr, 2, 1>,
     add_config: AddConfig,
     plaintext_col: Column<Advice>,
     ciphertext_c1_exp_col: Column<Instance>,
     ciphertext_c2_exp_col: Column<Instance>,
 }
 
-impl Chip<pallas::Base> for ElGamalChip {
+impl Chip<Fq> for ElGamalChip {
     type Config = ElGamalConfig;
     type Loaded = ();
 
@@ -55,28 +59,21 @@ impl Chip<pallas::Base> for ElGamalChip {
 impl ElGamalChip {
     pub fn new(p: ElGamalConfig) -> ElGamalChip {
         ElGamalChip {
-            ecc: EccChip::construct(p.ecc_config.clone()),
+            ecc: BaseFieldEccChip::new(p.ecc_config.clone()),
             poseidon: PoseidonChip::construct(p.poseidon_config.clone()),
             add: AddChip::construct(p.add_config.clone()),
             config: p,
         }
     }
 
-    fn configure(meta: &mut ConstraintSystem<pallas::Base>) -> ElGamalConfig {
+    fn configure(meta: &mut ConstraintSystem<Fr>) -> ElGamalConfig {
         let advices = [
-            meta.advice_column(),
-            meta.advice_column(),
-            meta.advice_column(),
-            meta.advice_column(),
-            meta.advice_column(),
-            meta.advice_column(),
-            meta.advice_column(),
             meta.advice_column(),
             meta.advice_column(),
             meta.advice_column(),
         ];
 
-        let table_idx = meta.lookup_table_column();
+        // let table_idx = meta.lookup_table_column();
 
         // Poseidon requires four advice columns, while ECC incomplete addition requires
         // six, so we could choose to configure them in parallel. However, we only use a
@@ -89,26 +86,34 @@ impl ElGamalChip {
             meta.fixed_column(),
             meta.fixed_column(),
             meta.fixed_column(),
-            meta.fixed_column(),
-            meta.fixed_column(),
-            meta.fixed_column(),
         ];
-        let rc_a = lagrange_coeffs[2..5].try_into().unwrap();
-        let rc_b = lagrange_coeffs[5..8].try_into().unwrap();
+        let rc_a = lagrange_coeffs[0..2].try_into().unwrap();
+        let rc_b = lagrange_coeffs[2..4].try_into().unwrap();
 
         // Also use the first Lagrange coefficient column for loading global constants.
         // It's free real estate :)
-        meta.enable_constant(lagrange_coeffs[0]);
+        meta.enable_constant(lagrange_coeffs[4]);
 
-        // Shared fixed column for loading constants
-        let range_check = LookupRangeCheckConfig::configure(meta, advices[9], table_idx);
-        let ecc_config =
-            EccChip::<TestFixedBases>::configure(meta, advices, lagrange_coeffs, range_check);
+        let rns =
+            Rns::<<G1Affine as CurveAffine>::Base, Fr, NUMBER_OF_LIMBS, BIT_LEN_LIMB>::construct();
 
-        let poseidon_config = PoseidonChip::configure::<poseidon::P128Pow5T3>(
+        let main_gate_config = MainGate::<Fr>::configure(meta);
+        let overflow_bit_lens = rns.overflow_lengths();
+        let composition_bit_lens = vec![BIT_LEN_LIMB / NUMBER_OF_LIMBS];
+
+        let range_config = RangeChip::<Fr>::configure(
             meta,
-            advices[6..9].try_into().unwrap(),
-            advices[5],
+            &main_gate_config,
+            composition_bit_lens,
+            overflow_bit_lens,
+        );
+
+        let ecc_config = EccConfig::new(range_config, main_gate_config);
+
+        let poseidon_config = PoseidonChip::configure::<PoseidonSpec>(
+            meta,
+            advices[1..3].try_into().unwrap(),
+            advices[0],
             rc_a,
             rc_b,
         );
@@ -141,14 +146,14 @@ impl ElGamalChip {
 
 #[derive(Default, Clone)]
 pub struct ElGamalGadget {
-    r: pallas::Scalar,
-    msg: Vec<pallas::Base>,
-    pk: pallas::Point,
-    pub resulted_ciphertext: (pallas::Point, Vec<pallas::Base>),
+    r: Fr,
+    msg: Vec<Fr>,
+    pk: G1Affine,
+    pub resulted_ciphertext: (G1, Vec<Fr>),
 }
 
 impl ElGamalGadget {
-    pub fn new(r: pallas::Scalar, msg: Vec<pallas::Base>, pk: pallas::Point) -> ElGamalGadget {
+    pub fn new(r: Fr, msg: Vec<Fr>, pk: G1Affine) -> ElGamalGadget {
         let resulted_ciphertext = Self::encrypt(pk.clone(), msg.clone(), r.clone());
         return Self {
             r,
@@ -158,30 +163,27 @@ impl ElGamalGadget {
         };
     }
 
-    pub fn keygen<R: CryptoRng + RngCore>(
-        mut rng: &mut R,
-    ) -> anyhow::Result<(pallas::Scalar, pallas::Point)> {
+    pub fn keygen<R: CryptoRng + RngCore>(mut rng: &mut R) -> anyhow::Result<(Fr, G1)> {
         // get a random element from the scalar field
-        let secret_key = pallas::Scalar::random(&mut rng);
+        let secret_key = Fr::random(&mut rng);
 
         // compute secret_key*generator to derive the public key
-        let mut public_key = pallas::Point::generator();
+        // With BN256, we create the private key from a random number. This is a private key value (sk
+        //  and a public key mapped to the G2 curve:: pk=sk.G2
+        let mut public_key = G1::generator();
         public_key.mul_assign(secret_key.clone());
 
         Ok((secret_key, public_key))
     }
 
-    pub fn encrypt(
-        pk: pallas::Point,
-        msg: Vec<pallas::Base>,
-        r: pallas::Scalar,
-    ) -> (pallas::Point, Vec<pallas::Base>) {
-        let c1 = pallas::Point::generator().mul(&r);
+    pub fn encrypt(pk: G1Affine, msg: Vec<Fr>, r: Fr) -> (G1, Vec<Fr>) {
+        let g = G1Affine::generator();
+        let c1 = g.mul(&r);
+
         let p_ra = pk.mul(&r).to_affine().coordinates().unwrap();
 
-        let hasher =
-            poseidon::Hash::<pallas::Base, poseidon::P128Pow5T3, ConstantLength<2>, 3, 2>::init();
-        let dh = hasher.hash([p_ra.x().clone(), p_ra.y().clone()]);
+        let hasher = poseidon::Hash::<Fr, PoseidonSpec, ConstantLength<2>, 2, 1>::init();
+        let dh = hasher.hash([p_ra.x().clone(), p_ra.y().clone()]); // this is Fq now :( (we need Fr)
 
         let mut c2 = vec![];
 
@@ -192,12 +194,12 @@ impl ElGamalGadget {
         return (c1, c2);
     }
 
-    pub fn get_instances(cipher: &(pallas::Point, Vec<pallas::Base>)) -> Vec<Vec<pallas::Base>> {
+    pub fn get_instances(cipher: &(G1, Vec<Fq>)) -> Vec<Vec<Fq>> {
         let c1_coordinates = cipher
             .0
             .to_affine()
             .coordinates()
-            .map(|c| vec![c.x().clone(), c.y().clone()])
+            .map(|c| vec![c.x().clone(), c.y().clone().into()])
             .unwrap();
 
         vec![c1_coordinates, cipher.1.clone()]
@@ -205,40 +207,53 @@ impl ElGamalGadget {
 
     pub(crate) fn verify_encryption(
         &self,
-        mut layouter: impl Layouter<pallas::Base>,
+        mut layouter: impl Layouter<Fr>,
         config: ElGamalConfig,
-        m: &AssignedCell<pallas::Base, pallas::Base>,
-    ) -> Result<(EccPoint, AssignedCell<pallas::Base, pallas::Base>), plonk::Error> {
+        m: &AssignedCell<Fr, Fr>,
+    ) -> Result<
+        (
+            AssignedPoint<Fq, Fr, NUMBER_OF_LIMBS, BIT_LEN_LIMB>,
+            AssignedCell<Fr, Fr>,
+        ),
+        plonk::Error,
+    > {
         let chip = ElGamalChip::new(config.clone());
 
-        let g = pallas::Point::generator();
+        let g = G1Affine::generator();
+        let c1 = g.mul(self.r).to_affine();
 
         // compute s = randomness*pk
         let s = self.pk.clone().mul(self.r).to_affine();
-        let s = chip
-            .ecc
-            .witness_point(&mut layouter, Value::known(s))
-            .unwrap();
 
-        // compute c1 = randomness*generator
-        let c1 = g.mul(self.r).to_affine();
-        let c1 = chip
-            .ecc
-            .witness_point(&mut layouter, Value::known(c1))
-            .unwrap();
+        let (s, c1) = layouter.assign_region(
+            || "region 0",
+            |region| {
+                let offset = 0;
+                let ctx = &mut RegionCtx::new(region, offset);
+
+                let s = chip.ecc.assign_point(ctx, Value::known(s)).unwrap();
+
+                // compute c1 = randomness*generator
+
+                let c1 = chip.ecc.assign_point(ctx, Value::known(c1)).unwrap();
+
+                Ok((s, c1))
+            },
+        )?;
 
         // compute dh = poseidon_hash(randomness*pk)
         let dh = {
-            let poseidon_message = [s.x(), s.y()];
-            let poseidon_hasher =
-                PoseidonHash::<
-                    pallas::Base,
-                    PoseidonChip<pallas::Base, 3, 2>,
-                    poseidon::P128Pow5T3,
-                    ConstantLength<2>,
-                    3,
-                    2,
-                >::init(chip.poseidon, layouter.namespace(|| "Poseidon hasher"))?;
+            let poseidon_message = [s.x().native().clone(), s.y().native().clone()];
+            let poseidon_hasher = PoseidonHash::<
+                Fr,
+                PoseidonChip<Fr, 2, 1>,
+                PoseidonSpec,
+                ConstantLength<2>,
+                2,
+                1,
+            >::init(
+                chip.poseidon, layouter.namespace(|| "Poseidon hasher")
+            )?;
             poseidon_hasher.hash(
                 layouter.namespace(|| "Poseidon hash (randomness*pk)"),
                 poseidon_message,
@@ -256,7 +271,7 @@ impl ElGamalGadget {
     }
 }
 
-impl Circuit<pallas::Base> for ElGamalGadget {
+impl Circuit<Fr> for ElGamalGadget {
     type Config = ElGamalConfig;
     type FloorPlanner = SimpleFloorPlanner;
     type Params = ();
@@ -264,13 +279,13 @@ impl Circuit<pallas::Base> for ElGamalGadget {
         Self::default()
     }
     //type Config = EccConfig;
-    fn configure(cs: &mut ConstraintSystem<pallas::Base>) -> Self::Config {
+    fn configure(cs: &mut ConstraintSystem<Fr>) -> Self::Config {
         ElGamalChip::configure(cs)
     }
     fn synthesize(
         &self,
         config: Self::Config,
-        mut layouter: impl Layouter<pallas::Base>,
+        mut layouter: impl Layouter<Fr>,
     ) -> Result<(), Error> {
         let msg_var = layouter.assign_region(
             || "plaintext",
@@ -299,8 +314,12 @@ impl Circuit<pallas::Base> for ElGamalGadget {
                 &msg_var[i],
             )?;
             layouter
-                .constrain_instance(c1.x().cell(), config.ciphertext_c1_exp_col, C1_X)
-                .and(layouter.constrain_instance(c1.y().cell(), config.ciphertext_c1_exp_col, C1_Y))
+                .constrain_instance(c1.x().native().cell(), config.ciphertext_c1_exp_col, C1_X)
+                .and(layouter.constrain_instance(
+                    c1.y().native().cell(),
+                    config.ciphertext_c1_exp_col,
+                    C1_Y,
+                ))
                 .and(layouter.constrain_instance(c2.cell(), config.ciphertext_c2_exp_col, i))?;
         }
         Ok(())
