@@ -1,8 +1,12 @@
 use crate::add_chip::{AddChip, AddConfig, AddInstruction};
+use ark_std::rand::rngs::OsRng;
 use ark_std::rand::{CryptoRng, RngCore};
-use ecc::integer::rns::Rns;
-use ecc::maingate::{MainGate, RangeChip, RegionCtx};
-use ecc::{AssignedPoint, BaseFieldEccChip, EccConfig, GeneralEccChip};
+use ecc::integer::rns::{Common, Integer, Rns};
+use ecc::integer::NUMBER_OF_LOOKUP_LIMBS;
+use ecc::maingate::{
+    MainGate, MainGateConfig, RangeChip, RangeConfig, RangeInstructions, RegionCtx,
+};
+use ecc::{AssignedPoint, BaseFieldEccChip, EccConfig, GeneralEccChip, Point};
 use ezkl_lib::circuit::modules::poseidon::spec::PoseidonSpec;
 use halo2_gadgets::poseidon::{
     primitives::{self as poseidon, ConstantLength},
@@ -14,8 +18,10 @@ use halo2_proofs::plonk;
 use halo2_proofs::plonk::{Advice, Circuit, Column, ConstraintSystem, Error, Instance};
 use halo2curves::bn256::{Fq, Fr, G1Affine, G1};
 use halo2curves::group::Curve;
+use halo2curves::group::Group;
 use halo2curves::CurveAffine;
 use std::ops::{Mul, MulAssign};
+use std::rc::Rc;
 use std::vec;
 
 // Absolute offsets for public inputs.
@@ -35,12 +41,26 @@ pub struct ElGamalChip {
 
 #[derive(Debug, Clone)]
 pub struct ElGamalConfig {
-    ecc_config: ecc::EccConfig,
+    main_gate_config: MainGateConfig,
+    range_config: RangeConfig,
     poseidon_config: PoseidonConfig<Fr, 2, 1>,
     add_config: AddConfig,
     plaintext_col: Column<Advice>,
     ciphertext_c1_exp_col: Column<Instance>,
     ciphertext_c2_exp_col: Column<Instance>,
+}
+
+impl ElGamalConfig {
+    fn config_range(&self, layouter: &mut impl Layouter<Fr>) -> Result<(), Error> {
+        let range_chip = RangeChip::<Fr>::new(self.range_config.clone());
+        range_chip.load_table(layouter)?;
+
+        Ok(())
+    }
+
+    fn ecc_chip_config(&self) -> EccConfig {
+        EccConfig::new(self.range_config.clone(), self.main_gate_config.clone())
+    }
 }
 
 impl Chip<Fq> for ElGamalChip {
@@ -56,10 +76,26 @@ impl Chip<Fq> for ElGamalChip {
     }
 }
 
+fn rns<C: CurveAffine>() -> Rns<C::Base, C::Scalar, NUMBER_OF_LIMBS, BIT_LEN_LIMB> {
+    Rns::construct()
+}
+
+fn setup<C: CurveAffine>(
+    k_override: u32,
+) -> (Rns<C::Base, C::Scalar, NUMBER_OF_LIMBS, BIT_LEN_LIMB>, u32) {
+    let rns = rns::<C>();
+    let bit_len_lookup = BIT_LEN_LIMB / NUMBER_OF_LOOKUP_LIMBS;
+    let mut k: u32 = (bit_len_lookup + 1) as u32;
+    if k_override != 0 {
+        k = k_override;
+    }
+    (rns, k)
+}
+
 impl ElGamalChip {
     pub fn new(p: ElGamalConfig) -> ElGamalChip {
         ElGamalChip {
-            ecc: BaseFieldEccChip::new(p.ecc_config.clone()),
+            ecc: BaseFieldEccChip::new(p.ecc_chip_config().clone()),
             poseidon: PoseidonChip::construct(p.poseidon_config.clone()),
             add: AddChip::construct(p.add_config.clone()),
             config: p,
@@ -94,8 +130,7 @@ impl ElGamalChip {
         // It's free real estate :)
         meta.enable_constant(lagrange_coeffs[4]);
 
-        let rns =
-            Rns::<<G1Affine as CurveAffine>::Base, Fr, NUMBER_OF_LIMBS, BIT_LEN_LIMB>::construct();
+        let rns = Rns::<Fq, Fr, NUMBER_OF_LIMBS, BIT_LEN_LIMB>::construct();
 
         let main_gate_config = MainGate::<Fr>::configure(meta);
         let overflow_bit_lens = rns.overflow_lengths();
@@ -107,8 +142,6 @@ impl ElGamalChip {
             composition_bit_lens,
             overflow_bit_lens,
         );
-
-        let ecc_config = EccConfig::new(range_config, main_gate_config);
 
         let poseidon_config = PoseidonChip::configure::<PoseidonSpec>(
             meta,
@@ -135,7 +168,8 @@ impl ElGamalChip {
 
         ElGamalConfig {
             poseidon_config,
-            ecc_config,
+            main_gate_config,
+            range_config,
             add_config,
             plaintext_col,
             ciphertext_c1_exp_col,
@@ -163,6 +197,11 @@ impl ElGamalGadget {
         };
     }
 
+    fn rns() -> Rc<Rns<Fq, Fr, NUMBER_OF_LIMBS, BIT_LEN_LIMB>> {
+        let rns = Rns::<Fq, Fr, NUMBER_OF_LIMBS, BIT_LEN_LIMB>::construct();
+        Rc::new(rns)
+    }
+
     pub fn keygen<R: CryptoRng + RngCore>(mut rng: &mut R) -> anyhow::Result<(Fr, G1)> {
         // get a random element from the scalar field
         let secret_key = Fr::random(&mut rng);
@@ -180,10 +219,13 @@ impl ElGamalGadget {
         let g = G1Affine::generator();
         let c1 = g.mul(&r);
 
-        let p_ra = pk.mul(&r).to_affine().coordinates().unwrap();
+        let coords = pk.mul(&r).to_affine().coordinates().unwrap();
+
+        let x = Integer::from_fe(*coords.x(), Self::rns());
+        let y = Integer::from_fe(*coords.y(), Self::rns());
 
         let hasher = poseidon::Hash::<Fr, PoseidonSpec, ConstantLength<2>, 2, 1>::init();
-        let dh = hasher.hash([p_ra.x().clone(), p_ra.y().clone()]); // this is Fq now :( (we need Fr)
+        let dh = hasher.hash([x.native().clone(), y.native().clone()]); // this is Fq now :( (we need Fr)
 
         let mut c2 = vec![];
 
@@ -194,12 +236,17 @@ impl ElGamalGadget {
         return (c1, c2);
     }
 
-    pub fn get_instances(cipher: &(G1, Vec<Fq>)) -> Vec<Vec<Fq>> {
+    pub fn get_instances(cipher: &(G1, Vec<Fr>)) -> Vec<Vec<Fr>> {
         let c1_coordinates = cipher
             .0
             .to_affine()
             .coordinates()
-            .map(|c| vec![c.x().clone(), c.y().clone().into()])
+            .map(|c| {
+                let x = Integer::from_fe(*c.x(), Self::rns());
+                let y = Integer::from_fe(*c.y(), Self::rns());
+
+                vec![x.native().clone(), y.native().clone()]
+            })
             .unwrap();
 
         vec![c1_coordinates, cipher.1.clone()]
@@ -234,7 +281,6 @@ impl ElGamalGadget {
                 let s = chip.ecc.assign_point(ctx, Value::known(s)).unwrap();
 
                 // compute c1 = randomness*generator
-
                 let c1 = chip.ecc.assign_point(ctx, Value::known(c1)).unwrap();
 
                 Ok((s, c1))
@@ -266,6 +312,8 @@ impl ElGamalGadget {
             &dh,
             m,
         )?;
+
+        config.config_range(&mut layouter)?;
 
         Ok((c1, c2))
     }
