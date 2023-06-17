@@ -1,4 +1,5 @@
 use crate::add_chip::{AddChip, AddConfig, AddInstruction};
+use ark_std::rand::rngs::OsRng;
 use ark_std::rand::{CryptoRng, RngCore};
 use ecc::integer::rns::{Common, Integer, Rns};
 use ecc::maingate::{
@@ -15,7 +16,7 @@ use halo2_proofs::circuit::{AssignedCell, Chip, Layouter, SimpleFloorPlanner, Va
 use halo2_proofs::plonk;
 use halo2_proofs::plonk::{Advice, Circuit, Column, ConstraintSystem, Error, Instance};
 use halo2curves::bn256::{Fq, Fr, G1Affine, G1};
-use halo2curves::group::Curve;
+use halo2curves::group::{Curve, Group};
 use halo2curves::CurveAffine;
 use std::ops::{Mul, MulAssign};
 use std::rc::Rc;
@@ -28,6 +29,13 @@ const C1_Y: usize = 1;
 ///
 const NUMBER_OF_LIMBS: usize = 4;
 const BIT_LEN_LIMB: usize = 64;
+
+type CircuitCipher = (
+    AssignedPoint<Fq, Fr, NUMBER_OF_LIMBS, BIT_LEN_LIMB>,
+    AssignedCell<Fr, Fr>,
+);
+
+type CircuitHash = PoseidonHash<Fr, PoseidonChip<Fr, 2, 1>, PoseidonSpec, ConstantLength<2>, 2, 1>;
 
 pub struct ElGamalChip {
     config: ElGamalConfig,
@@ -45,6 +53,7 @@ pub struct ElGamalConfig {
     plaintext_col: Column<Advice>,
     ciphertext_c1_exp_col: Column<Instance>,
     ciphertext_c2_exp_col: Column<Instance>,
+    sk_commitment_col: Column<Instance>,
 }
 
 impl ElGamalConfig {
@@ -146,6 +155,9 @@ impl ElGamalChip {
         let ciphertext_c2_exp_col = meta.instance_column();
         meta.enable_equality(ciphertext_c2_exp_col);
 
+        let sk_commitment_col = meta.instance_column();
+        meta.enable_equality(sk_commitment_col);
+
         ElGamalConfig {
             poseidon_config,
             main_gate_config,
@@ -154,6 +166,7 @@ impl ElGamalChip {
             plaintext_col,
             ciphertext_c1_exp_col,
             ciphertext_c2_exp_col,
+            sk_commitment_col,
         }
     }
 }
@@ -163,17 +176,27 @@ pub struct ElGamalGadget {
     r: Fr,
     msg: Vec<Fr>,
     pk: G1Affine,
+    sk: Fr,
     pub resulted_ciphertext: (G1, Vec<Fr>),
+    pub sk_hash: Fr,
+    aux_generator: G1Affine,
+    window_size: usize,
 }
 
 impl ElGamalGadget {
-    pub fn new(r: Fr, msg: Vec<Fr>, pk: G1Affine) -> ElGamalGadget {
+    pub fn new(r: Fr, msg: Vec<Fr>, pk: G1Affine, sk: Fr) -> ElGamalGadget {
         let resulted_ciphertext = Self::encrypt(pk.clone(), msg.clone(), r.clone());
+        let sk_hash = Self::hash_sk(sk.clone());
+        let aux_generator = <G1Affine as CurveAffine>::CurveExt::random(OsRng).to_affine();
         return Self {
             r,
             msg,
             pk,
+            sk,
             resulted_ciphertext,
+            sk_hash,
+            aux_generator,
+            window_size: 1,
         };
     }
 
@@ -216,6 +239,12 @@ impl ElGamalGadget {
         return (c1, c2);
     }
 
+    pub fn hash_sk(sk: Fr) -> Fr {
+        let hasher = poseidon::Hash::<Fr, PoseidonSpec, ConstantLength<2>, 2, 1>::init();
+        let dh = hasher.hash([sk.clone(), sk.clone()]); // this is Fq now :( (we need Fr)
+        dh
+    }
+
     pub fn decrypt(cipher: &(G1, Vec<Fr>), sk: Fr) -> Vec<Fr> {
         let c1 = cipher.0.clone();
         let c2 = cipher.1.clone();
@@ -236,7 +265,7 @@ impl ElGamalGadget {
         return msg;
     }
 
-    pub fn get_instances(cipher: &(G1, Vec<Fr>)) -> Vec<Vec<Fr>> {
+    pub fn get_instances(cipher: &(G1, Vec<Fr>), sk_hash: Fr) -> Vec<Vec<Fr>> {
         let c1_coordinates = cipher
             .0
             .to_affine()
@@ -249,22 +278,38 @@ impl ElGamalGadget {
             })
             .unwrap();
 
-        vec![c1_coordinates, cipher.1.clone()]
+        vec![c1_coordinates, cipher.1.clone(), vec![sk_hash]]
+    }
+
+    pub(crate) fn verify_sk_hash(
+        &self,
+        mut layouter: impl Layouter<Fr>,
+        config: ElGamalConfig,
+        sk: &AssignedCell<Fr, Fr>,
+    ) -> Result<AssignedCell<Fr, Fr>, plonk::Error> {
+        let chip = ElGamalChip::new(config.clone());
+
+        // compute dh = poseidon_hash(randomness*pk)
+        let sk_hash = {
+            let poseidon_hasher =
+                CircuitHash::init(chip.poseidon, layouter.namespace(|| "Poseidon hasher"))?;
+            poseidon_hasher.hash(
+                layouter.namespace(|| "Poseidon hash (sk)"),
+                [sk.clone(), sk.clone()],
+            )?
+        };
+
+        Ok(sk_hash)
     }
 
     pub(crate) fn verify_encryption(
         &self,
         mut layouter: impl Layouter<Fr>,
-        config: ElGamalConfig,
+        config: &ElGamalConfig,
         m: &AssignedCell<Fr, Fr>,
-    ) -> Result<
-        (
-            AssignedPoint<Fq, Fr, NUMBER_OF_LIMBS, BIT_LEN_LIMB>,
-            AssignedCell<Fr, Fr>,
-        ),
-        plonk::Error,
-    > {
-        let chip = ElGamalChip::new(config.clone());
+        sk: &AssignedCell<Fr, Fr>,
+    ) -> Result<CircuitCipher, plonk::Error> {
+        let mut chip = ElGamalChip::new(config.clone());
 
         let g = G1Affine::generator();
         let c1 = g.mul(self.r).to_affine();
@@ -278,10 +323,18 @@ impl ElGamalGadget {
                 let offset = 0;
                 let ctx = &mut RegionCtx::new(region, offset);
 
+                chip.ecc
+                    .assign_aux_generator(ctx, Value::known(self.aux_generator))?;
+                chip.ecc.assign_aux(ctx, self.window_size, 1)?;
+
                 let s = chip.ecc.assign_point(ctx, Value::known(s)).unwrap();
 
                 // compute c1 = randomness*generator
                 let c1 = chip.ecc.assign_point(ctx, Value::known(c1)).unwrap();
+
+                let s_from_sk = chip.ecc.mul(ctx, &c1, sk, self.window_size).unwrap();
+
+                chip.ecc.assert_equal(ctx, &s, &s_from_sk)?;
 
                 Ok((s, c1))
             },
@@ -290,16 +343,8 @@ impl ElGamalGadget {
         // compute dh = poseidon_hash(randomness*pk)
         let dh = {
             let poseidon_message = [s.x().native().clone(), s.y().native().clone()];
-            let poseidon_hasher = PoseidonHash::<
-                Fr,
-                PoseidonChip<Fr, 2, 1>,
-                PoseidonSpec,
-                ConstantLength<2>,
-                2,
-                1,
-            >::init(
-                chip.poseidon, layouter.namespace(|| "Poseidon hasher")
-            )?;
+            let poseidon_hasher =
+                CircuitHash::init(chip.poseidon, layouter.namespace(|| "Poseidon hasher"))?;
             poseidon_hasher.hash(
                 layouter.namespace(|| "Poseidon hash (randomness*pk)"),
                 poseidon_message,
@@ -335,10 +380,10 @@ impl Circuit<Fr> for ElGamalGadget {
     ) -> Result<(), Error> {
         config.config_range(&mut layouter)?;
 
-        let msg_var = layouter.assign_region(
+        let (msg_var, sk_var) = layouter.assign_region(
             || "plaintext",
             |mut region| {
-                let res: Result<Vec<_>, _> = self
+                let msg_var: Result<Vec<_>, _> = self
                     .msg
                     .iter()
                     .enumerate()
@@ -351,16 +396,37 @@ impl Circuit<Fr> for ElGamalGadget {
                         )
                     })
                     .collect();
-                res
+
+                let sk_var = region.assign_advice(
+                    || "sk",
+                    config.plaintext_col,
+                    self.msg.len(),
+                    || Value::known(self.sk),
+                )?;
+
+                Ok((msg_var?, sk_var))
             },
         )?;
 
+        // Force the public input to be the hash of the secret key so that we can ascertain decryption can happen
+        let sk_hash = self.verify_sk_hash(
+            layouter.namespace(|| "verify_sk_hash"),
+            config.clone(),
+            &sk_var,
+        )?;
+        layouter.constrain_instance(sk_hash.cell(), config.sk_commitment_col, 0)?;
+
         for i in 0..msg_var.len() {
-            let (c1, c2) = self.verify_encryption(
+            let cipher = self.verify_encryption(
                 layouter.namespace(|| "verify_encryption"),
-                config.clone(),
+                &config,
                 &msg_var[i],
+                &sk_var,
             )?;
+
+            let c1 = cipher.0;
+            let c2 = cipher.1;
+
             layouter
                 .constrain_instance(c1.x().native().cell(), config.ciphertext_c1_exp_col, C1_X)
                 .and(layouter.constrain_instance(
@@ -393,7 +459,7 @@ mod tests {
             msg.push(Fr::random(&mut rng));
         }
 
-        let circuit = ElGamalGadget::new(r, msg, pk.to_affine());
+        let circuit = ElGamalGadget::new(r, msg, pk.to_affine(), sk);
         let cipher_text = circuit.resulted_ciphertext.clone();
 
         let decrypted_msg = ElGamalGadget::decrypt(&cipher_text, sk);

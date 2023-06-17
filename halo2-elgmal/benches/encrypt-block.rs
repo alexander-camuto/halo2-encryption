@@ -18,21 +18,21 @@ use std::ops::Deref;
 
 fn rundot(c: &mut Criterion) {
     let mut group = c.benchmark_group("encrypt-block");
-    let params = <KZGCommitmentScheme<Bn256> as CommitmentScheme>::ParamsProver::new(20);
+    let params = <KZGCommitmentScheme<Bn256> as CommitmentScheme>::ParamsProver::new(23);
 
     for &len in [
-        4 * 4,
-        28 * 28,
-        58 * 58,
-        128 * 128,
+        // 4 * 4,
+        // 28 * 28,
+        // 58 * 58,
+        // 128 * 128,
         2046 * 2046,
-        10000 * 10000,
+        // 10000 * 10000,
     ]
     .iter()
     {
         let mut rng = test_rng();
 
-        let (_sk, pk) = ElGamalGadget::keygen(&mut rng).unwrap();
+        let (sk, pk) = ElGamalGadget::keygen(&mut rng).unwrap();
 
         let r = Fr::random(&mut rng);
 
@@ -42,7 +42,7 @@ fn rundot(c: &mut Criterion) {
             msg.push(Fr::random(&mut rng));
         }
 
-        let circuit = ElGamalGadget::new(r, msg, pk.to_affine());
+        let circuit = ElGamalGadget::new(r, msg, pk.to_affine(), sk);
 
         group.throughput(Throughput::Elements(len as u64));
         group.bench_with_input(BenchmarkId::new("pk", len), &len, |b, &_| {
@@ -56,7 +56,10 @@ fn rundot(c: &mut Criterion) {
             .unwrap();
 
         let mut instances: Vec<Vec<Fr>> = vec![vec![]];
-        instances.extend(ElGamalGadget::get_instances(&circuit.resulted_ciphertext));
+        instances.extend(ElGamalGadget::get_instances(
+            &circuit.resulted_ciphertext,
+            circuit.sk_hash,
+        ));
         let pi_inner = instances.iter().map(|e| e.deref()).collect::<Vec<&[Fr]>>();
         let pi_inner: &[&[&[Fr]]] = &[&pi_inner];
 
