@@ -360,24 +360,8 @@ impl ElGamalGadget {
 
         Ok((c1, c2))
     }
-}
 
-impl Circuit<Fr> for ElGamalGadget {
-    type Config = ElGamalConfig;
-    type FloorPlanner = SimpleFloorPlanner;
-    type Params = ();
-    fn without_witnesses(&self) -> Self {
-        Self::default()
-    }
-    //type Config = EccConfig;
-    fn configure(cs: &mut ConstraintSystem<Fr>) -> Self::Config {
-        ElGamalChip::configure(cs)
-    }
-    fn synthesize(
-        &self,
-        config: Self::Config,
-        mut layouter: impl Layouter<Fr>,
-    ) -> Result<(), Error> {
+    fn layout(&self, config: Self::Config, mut layouter: impl Layouter<Fr>) -> Result<(), Error> {
         config.config_range(&mut layouter)?;
 
         let (msg_var, sk_var) = layouter.assign_region(
@@ -437,6 +421,26 @@ impl Circuit<Fr> for ElGamalGadget {
                 .and(layouter.constrain_instance(c2.cell(), config.ciphertext_c2_exp_col, i))?;
         }
         Ok(())
+    }
+}
+
+impl Circuit<Fr> for ElGamalGadget {
+    type Config = ElGamalConfig;
+    type FloorPlanner = SimpleFloorPlanner;
+    type Params = ();
+    fn without_witnesses(&self) -> Self {
+        Self::default()
+    }
+    //type Config = EccConfig;
+    fn configure(cs: &mut ConstraintSystem<Fr>) -> Self::Config {
+        ElGamalChip::configure(cs)
+    }
+    fn synthesize(
+        &self,
+        config: Self::Config,
+        mut layouter: impl Layouter<Fr>,
+    ) -> Result<(), Error> {
+        self.layout(config, layouter)
     }
 }
 
